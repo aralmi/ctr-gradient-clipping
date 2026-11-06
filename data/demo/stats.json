@@ -1,0 +1,68 @@
+{
+  "dataset": "criteo_attribution",
+  "source_sha256": "94ac7a465564349bc7ba008602211d5990a3c53cc133abc0aadef61ea2391a98",
+  "split_seed": 42,
+  "categorical": [
+    "campaign",
+    "cat1",
+    "cat2",
+    "cat3",
+    "cat4",
+    "cat5",
+    "cat6",
+    "cat7",
+    "cat8",
+    "cat9"
+  ],
+  "numeric": [
+    "relative_hour_sin",
+    "relative_hour_cos"
+  ],
+  "cardinalities": [
+    2048,
+    2048,
+    2048,
+    2048,
+    2048,
+    2048,
+    2048,
+    2048,
+    2048,
+    2048
+  ],
+  "occupied_buckets": {
+    "campaign": 578,
+    "cat1": 9,
+    "cat2": 49,
+    "cat3": 1045,
+    "cat4": 13,
+    "cat5": 49,
+    "cat6": 29,
+    "cat7": 1948,
+    "cat8": 11,
+    "cat9": 30
+  },
+  "splits": {
+    "train": {
+      "rows": 30000,
+      "ctr": 0.3519,
+      "sha256": "81c1919f5f7c7dd06203bee74862f8e159fc494e12d293aa25748564a5aa05e6",
+      "dates": [
+        "day_00",
+        "day_01",
+        "day_02",
+        "day_03",
+        "day_04",
+        "day_05"
+      ]
+    },
+    "validation": {
+      "rows": 5000,
+      "ctr": 0.3466,
+      "sha256": "c5e480675ac40dc49bbede372a58f65a6f2d44df555a4ebda92c5c2c3e91fa2a",
+      "dates": [
+        "day_06"
+      ]
+    }
+  }
+}
