@@ -8,6 +8,7 @@ import torch
 GRADIENT_METHODS = {
     "none", "global_norm", "value", "agc", "agc_listing", "adagc", "adagc_listing",
     "autoclip", "zclip", "zclip_listing", "softadaclip", "softadaclip_layer",
+    "cowclip", "spamp",
 }
 
 
@@ -18,6 +19,31 @@ def norm(tensors):
 
 def scale_for(raw, threshold):
     return min(1.0, threshold / raw) if raw else 1.0
+
+
+@torch.no_grad()
+def cowclip_embeddings(embeddings, categories, *, ratio=1.0, minimum=1e-5):
+    """Apply the per-category CowClip threshold to dense PyTorch embeddings."""
+    changed = False
+    for column, embedding in enumerate(embeddings):
+        weight = embedding.weight
+        if weight.grad is None:
+            continue
+        counts = torch.bincount(categories[:, column], minlength=weight.size(0))
+        thresholds = counts * (ratio * weight.norm(dim=1)).clamp_min(minimum)
+        lengths = weight.grad.norm(dim=1)
+        factors = torch.where(lengths > thresholds, thresholds / lengths.clamp_min(
+            torch.finfo(lengths.dtype).tiny), 1.0)
+        weight.grad.mul_(factors.unsqueeze(1))
+        changed |= bool((factors < 1).any())
+    return changed
+
+
+def spectral_clip(update, threshold):
+    left, singular, right = torch.linalg.svd(update, full_matrices=False)
+    if not bool((singular > threshold).any()):
+        return update, False
+    return (left * singular.clamp_max(threshold)) @ right, True
 
 
 class GradientClipper:
@@ -103,6 +129,16 @@ class GradientClipper:
                 grad.mul_(factor)
                 changed |= bool((factor < 1).any())
                 continue
+            if self.method == "spamp":
+                beta = self.options.get("beta", 0.99)
+                target = beta * previous + (1 - beta) * length
+                self.local[i] = target
+                exponent = max(self.options.get("min_exponent", 0.7), min(1.0, target / length))
+                shaped = grad.sign() * grad.abs().pow(exponent)
+                factor = scale_for(torch.linalg.vector_norm(shaped).item(), target)
+                grad.copy_(shaped * factor)
+                changed |= exponent < 1.0 or factor < 1.0
+                continue
             if self.method == "adagc":
                 beta = self.options.get("beta", 0.99)
                 factor = scale_for(length, self.options.get("relative", 1.04) * previous)
@@ -122,7 +158,7 @@ class GradientClipper:
         return changed
 
     @torch.no_grad()
-    def clip(self, parameters):
+    def clip(self, parameters, *, embeddings=None, categories=None):
         grads = [(i, p, p.grad) for i, p in enumerate(parameters) if p.grad is not None]
         raw = norm(grad for _, _, grad in grads)
         if not math.isfinite(raw):
@@ -134,7 +170,11 @@ class GradientClipper:
         threshold = self.options.get("threshold", 1.0)
         if self.method == "none":
             return raw, raw, False
-        if self.method == "value":
+        if self.method == "cowclip":
+            if embeddings is None or categories is None:
+                raise ValueError("CowClip requires embedding tables and the current categories")
+            changed = cowclip_embeddings(embeddings, categories, **self.options)
+        elif self.method == "value":
             changed = any(bool((grad.abs() > threshold).any()) for _, _, grad in grads)
             if changed:
                 for _, _, grad in grads:
@@ -153,7 +193,7 @@ class GradientClipper:
 
 OPTIMIZER_METHODS = {
     "adam", "adamclip", "adamclip_grad", "adamwclip", "stableadamw", "stableadamw_listing",
-    "spam", "stable_spam",
+    "spam", "stable_spam", "spectra",
 }
 
 
@@ -166,6 +206,8 @@ class ClippedAdam(torch.optim.Optimizer):
             method=method, lr=lr, betas=betas, eps=eps, weight_decay=weight_decay,
             iteration=0, **options,
         )
+        if method == "spectra" and not 0 < options.get("threshold", 10.0):
+            raise ValueError("SPECTRA threshold must be positive")
         super().__init__(params, defaults)
         self.last_stats = {}
 
@@ -257,6 +299,9 @@ class ClippedAdam(torch.optim.Optimizer):
                         bound *= gradient.square().mean().sqrt().item()
                     triggered |= bool((update.abs() > bound).any())
                     update.clamp_(-bound, bound)
+                elif method == "spectra" and p.ndim == 2 and group.get("spectral", True):
+                    update, clipped = spectral_clip(update, group.get("threshold", 10.0))
+                    triggered |= clipped
                 elif method == "stableadamw":
                     rms = (gradient.square() / corrected_variance.clamp_min(eps ** 2)).mean().sqrt().item()
                     scale = max(1.0, rms / threshold)

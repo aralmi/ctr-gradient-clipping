@@ -70,8 +70,19 @@ class Training:
         options = config.get("method_options", {})
         betas = tuple(config.get("betas", (0.9, 0.999)))
         kwargs = dict(lr=config["lr"], betas=betas, weight_decay=config["weight_decay"])
+        if method in ("cowclip", "spectra") and architecture != "mlp":
+            raise ValueError(f"{method} requires the MLP architecture")
+        self.method = method
         if method in OPTIMIZER_METHODS:
-            self.optimizer = ClippedAdam(self.parameters, method, **kwargs, **options)
+            params = self.parameters
+            if method == "spectra":
+                embedding_ids = {id(table.weight) for table in self.model.embeddings}
+                params = [
+                    {"params": [p for p in self.parameters if id(p) in embedding_ids],
+                     "spectral": False},
+                    {"params": [p for p in self.parameters if id(p) not in embedding_ids]},
+                ]
+            self.optimizer = ClippedAdam(params, method, **kwargs, **options)
             self.clipper = GradientClipper("none")
         else:
             self.optimizer = torch.optim.AdamW(self.parameters, **kwargs)
@@ -94,11 +105,11 @@ class Training:
             step_start = time.perf_counter()
             self.steps += 1
             step_lr = lr * min(1.0, self.steps / warmup) if warmup else lr
-            self.optimizer.param_groups[0]["lr"] = step_lr
+            for group in self.optimizer.param_groups:
+                group["lr"] = step_lr
             self.optimizer.zero_grad(set_to_none=True)
-            loss = self.loss_function(
-                self.model(data[0][indices], data[1][indices]), data[2][indices],
-            )
+            categories = data[0][indices]
+            loss = self.loss_function(self.model(categories, data[1][indices]), data[2][indices])
             if not torch.isfinite(loss).item():
                 raise FloatingPointError(f"Non-finite loss at step {self.steps}")
             loss.backward()
@@ -107,7 +118,12 @@ class Training:
                 for parameter in self.parameters:
                     if parameter.grad is not None:
                         parameter.grad.mul_(self.spike_factor)
-            raw, clipped, triggered = self.clipper.clip(self.parameters)
+            if self.method == "cowclip":
+                raw, clipped, triggered = self.clipper.clip(
+                    self.parameters, embeddings=self.model.embeddings, categories=categories,
+                )
+            else:
+                raw, clipped, triggered = self.clipper.clip(self.parameters)
             previous = [p.detach().clone() for p in self.parameters]
             self.optimizer.step()
             reset = False
